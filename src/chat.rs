@@ -1,9 +1,12 @@
 //! Chatting with the local model: turns a conversation into a prompt, runs it
-//! on the TensorRT-LLM engine, and streams the reply back as text.
+//! on the model's engine (TensorRT-LLM, or llama.cpp for GGUF models), and
+//! streams the reply back as text.
 
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(llamacpp)]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +18,8 @@ use tokenizers::Tokenizer;
 
 use crate::engine::{Engine, RequestId, Sampling};
 use crate::event::{Event, ReplyPiece};
+#[cfg(llamacpp)]
+use crate::llama::{self, LlamaEngine, Progress};
 use crate::memory;
 
 /// Qwen's chat format (ChatML) marks the end of every message with this token.
@@ -142,12 +147,24 @@ struct EnginePlugins {
     use_paged_context_fmha: bool,
 }
 
-/// The engine and tokenizer of one model.
+/// The engine a model runs on.
+enum Backend {
+    /// A TensorRT-LLM engine, with the model's Hugging Face tokenizer.
+    TensorRt { engine: Arc<Engine>, tokenizer: Arc<Tokenizer>, end_of_message_token: u32 },
+    /// A GGUF model on llama.cpp, which tokenizes by itself.
+    #[cfg(llamacpp)]
+    Llama {
+        engine: Arc<LlamaEngine>,
+        /// The model thinks before answering unless its reply starts with an
+        /// empty `<think></think>` block (Qwen3 and later).
+        skip_thinking: bool,
+    },
+}
+
+/// One loaded model, ready to chat.
 pub struct ChatModel {
     name: String,
-    engine: Arc<Engine>,
-    tokenizer: Arc<Tokenizer>,
-    end_of_message_token: u32,
+    backend: Backend,
     generation: GenerationConfig,
     limits: EngineLimits,
     max_tokens: u32,
@@ -181,13 +198,62 @@ impl ChatModel {
 
         Ok(Self {
             name,
-            engine: Arc::new(engine),
-            tokenizer: Arc::new(tokenizer),
-            end_of_message_token,
+            backend: Backend::TensorRt {
+                engine: Arc::new(engine),
+                tokenizer: Arc::new(tokenizer),
+                end_of_message_token,
+            },
             generation,
             limits: build.limits.within_kv_cache(kv_cache_tokens as usize),
             max_tokens: settings.max_tokens,
         })
+    }
+
+    /// Loads a GGUF model (`path` is the .gguf file) on llama.cpp.
+    #[cfg(llamacpp)]
+    pub fn load_gguf(path: &Path, settings: Settings) -> Result<Self> {
+        let file_bytes = fs::metadata(path).with_context(|| format!("cannot read {}", path.display()))?.len();
+        check_room_for_weights(file_bytes)?;
+        let engine = LlamaEngine::load(path)?;
+
+        let name = match path.file_stem() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => "model".to_owned(),
+        };
+        let template = engine.chat_template().unwrap_or_default();
+        if !template.contains("<|im_start|>") {
+            bail!("{name} does not use the ChatML chat format; only Qwen-style GGUF models are supported for now");
+        }
+        let skip_thinking = template.contains("<think>");
+
+        let requested = settings.kv_cache_tokens.min(engine.trained_context().max(memory::MIN_KV_CACHE_TOKENS));
+        let tokens = context_that_fits(&engine, requested)?;
+        let room_for_reply = (tokens / 4).min(2048) as usize;
+        let limits = EngineLimits { max_input_len: tokens as usize - room_for_reply, max_seq_len: tokens as usize };
+        // GGUF files carry no generation_config.json: use Qwen's recommended settings.
+        let generation = GenerationConfig {
+            temperature: settings.temperature.unwrap_or(0.7),
+            top_p: 0.8,
+            top_k: 20,
+            repetition_penalty: 1.1,
+        };
+
+        Ok(Self {
+            name,
+            backend: Backend::Llama { engine: Arc::new(engine), skip_thinking },
+            generation,
+            limits,
+            max_tokens: settings.max_tokens,
+        })
+    }
+
+    /// The engine's name, as shown in the status bar.
+    pub fn engine_name(&self) -> &'static str {
+        match &self.backend {
+            Backend::TensorRt { .. } => "TensorRT-LLM",
+            #[cfg(llamacpp)]
+            Backend::Llama { .. } => "llama.cpp",
+        }
     }
 
     /// The model's name, as shown in the status bar.
@@ -203,36 +269,108 @@ impl ChatModel {
     /// Starts generating the assistant's reply to `messages`. The reply is
     /// streamed to `events` as [`Event::Reply`] pieces tagged with its request id.
     pub fn start_reply(&self, messages: &[Message], events: Sender<Event>) -> Result<ReplyStream> {
-        let prompt = chatml_prompt(messages);
-        let encoding = self.tokenizer.encode(prompt, false).map_err(|error| anyhow!("cannot tokenize: {error}"))?;
-        let prompt_tokens = encoding.get_ids();
+        match &self.backend {
+            Backend::TensorRt { engine, tokenizer, end_of_message_token } => {
+                let encoding = tokenizer
+                    .encode(chatml_prompt(messages), false)
+                    .map_err(|error| anyhow!("cannot tokenize: {error}"))?;
+                let prompt_tokens = encoding.get_ids();
+                let sampling = Sampling {
+                    max_new_tokens: self.room_for_reply(prompt_tokens.len())?,
+                    temperature: self.generation.temperature,
+                    top_p: self.generation.top_p,
+                    top_k: self.generation.top_k,
+                    repetition_penalty: self.generation.repetition_penalty,
+                    random_seed: random_seed(),
+                    end_token: *end_of_message_token,
+                };
+                let request_id = engine.start(prompt_tokens, sampling)?;
 
-        if prompt_tokens.len() > self.limits.max_input_len {
+                let engine = Arc::clone(engine);
+                let tokenizer = Arc::clone(tokenizer);
+                let cancel = Cancel::TensorRt(Arc::clone(&engine));
+                thread::spawn(move || stream_reply(&engine, &tokenizer, request_id, &events));
+                Ok(ReplyStream { request_id, prompt_tokens: prompt_tokens.len(), cancel })
+            }
+            #[cfg(llamacpp)]
+            Backend::Llama { engine, skip_thinking } => {
+                let mut prompt = chatml_prompt(messages);
+                if *skip_thinking {
+                    prompt.push_str("<think>\n\n</think>\n\n");
+                }
+                let prompt_tokens = engine.tokenize(&prompt)?;
+                let sampling = llama::Sampling {
+                    max_new_tokens: self.room_for_reply(prompt_tokens.len())?,
+                    temperature: self.generation.temperature,
+                    top_p: self.generation.top_p,
+                    top_k: self.generation.top_k,
+                    repetition_penalty: self.generation.repetition_penalty,
+                    random_seed: random_seed() as u32,
+                };
+                static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+                let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                let stop = Arc::new(AtomicBool::new(false));
+
+                let engine = Arc::clone(engine);
+                let prompt_len = prompt_tokens.len();
+                let cancel = Cancel::Llama(Arc::clone(&stop));
+                thread::spawn(move || {
+                    stream_llama_reply(&engine, &prompt_tokens, sampling, request_id, &stop, &events)
+                });
+                Ok(ReplyStream { request_id, prompt_tokens: prompt_len, cancel })
+            }
+        }
+    }
+
+    /// How many tokens the reply to a prompt of `prompt_len` tokens may have.
+    fn room_for_reply(&self, prompt_len: usize) -> Result<u32> {
+        if prompt_len > self.limits.max_input_len {
             bail!(
-                "the conversation is {} tokens, over this engine's {} limit; press Ctrl+L to start a new one",
-                prompt_tokens.len(),
+                "the conversation is {prompt_len} tokens, over this engine's {} limit; press Ctrl+L to start a new one",
                 self.limits.max_input_len
             );
         }
         // Prompt and reply together must fit in the engine's sequence length.
-        let room_for_reply = self.limits.max_seq_len - prompt_tokens.len();
+        Ok(self.max_tokens.min((self.limits.max_seq_len - prompt_len) as u32))
+    }
+}
 
-        let sampling = Sampling {
-            max_new_tokens: self.max_tokens.min(room_for_reply as u32),
-            temperature: self.generation.temperature,
-            top_p: self.generation.top_p,
-            top_k: self.generation.top_k,
-            repetition_penalty: self.generation.repetition_penalty,
-            random_seed: random_seed(),
-            end_token: self.end_of_message_token,
-        };
-        let request_id = self.engine.start(prompt_tokens, sampling)?;
+/// Refuses to load a model whose weights would leave the system short of memory.
+#[cfg(llamacpp)]
+fn check_room_for_weights(weight_bytes: u64) -> Result<()> {
+    let Some(available) = memory::available_bytes() else {
+        return Ok(()); // not Linux: nothing to measure
+    };
+    if weight_bytes + memory::SYSTEM_HEADROOM > available {
+        let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+        bail!(
+            "not enough free memory: {:.1} GB available, but the model needs {:.1} GB plus room for the rest of \
+             the system. Close some applications (a web browser is often the largest) and try again.",
+            gib(available),
+            gib(weight_bytes),
+        );
+    }
+    Ok(())
+}
 
-        let engine = Arc::clone(&self.engine);
-        let tokenizer = Arc::clone(&self.tokenizer);
-        thread::spawn(move || stream_reply(&engine, &tokenizer, request_id, &events));
-
-        Ok(ReplyStream { request_id, prompt_tokens: prompt_tokens.len(), engine: Arc::clone(&self.engine) })
+/// Creates the largest context, up to `requested` tokens, that leaves the
+/// system its headroom: tries it, measures, and halves it until it fits.
+#[cfg(llamacpp)]
+fn context_that_fits(engine: &LlamaEngine, requested: u32) -> Result<u32> {
+    let mut tokens = requested;
+    loop {
+        engine.set_context(tokens)?;
+        let available = memory::available_bytes().unwrap_or(u64::MAX);
+        if available >= memory::SYSTEM_HEADROOM {
+            if tokens < requested {
+                eprintln!("memory is short: context limited to {tokens} tokens instead of {requested}");
+            }
+            return Ok(tokens);
+        }
+        if tokens / 2 < memory::MIN_KV_CACHE_TOKENS {
+            bail!("not enough free memory for even a {tokens}-token conversation; close some applications");
+        }
+        tokens /= 2;
     }
 }
 
@@ -296,13 +434,24 @@ pub struct ReplyStream {
     pub request_id: RequestId,
     /// Length of the prompt (the whole conversation so far), in tokens.
     pub prompt_tokens: usize,
-    engine: Arc<Engine>,
+    cancel: Cancel,
+}
+
+/// How to stop a reply on its engine.
+enum Cancel {
+    TensorRt(Arc<Engine>),
+    #[cfg(llamacpp)]
+    Llama(Arc<AtomicBool>),
 }
 
 impl ReplyStream {
     /// Stops generating on the GPU.
     pub fn cancel(&self) {
-        self.engine.cancel(self.request_id);
+        match &self.cancel {
+            Cancel::TensorRt(engine) => engine.cancel(self.request_id),
+            #[cfg(llamacpp)]
+            Cancel::Llama(stop) => stop.store(true, Ordering::Relaxed),
+        }
     }
 }
 
@@ -339,6 +488,50 @@ fn stream_reply(engine: &Engine, tokenizer: &Tokenizer, request_id: RequestId, e
             return;
         }
     }
+}
+
+/// Runs on a background thread: generates a reply on llama.cpp and sends its
+/// text to the UI, until the reply is complete or `stop` is set.
+#[cfg(llamacpp)]
+fn stream_llama_reply(
+    engine: &LlamaEngine,
+    prompt: &[u32],
+    sampling: llama::Sampling,
+    request_id: RequestId,
+    stop: &AtomicBool,
+    events: &Sender<Event>,
+) {
+    let mut pending = Vec::new();
+    let result = engine.generate(prompt, sampling, |progress| {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Progress::Token(bytes) = progress else {
+            return true; // still reading the prompt
+        };
+        pending.extend_from_slice(bytes);
+        let piece = ReplyPiece::Text { text: take_complete_utf8(&mut pending), token_count: 1 };
+        events.send(Event::Reply { request_id, piece }).is_ok() // stops once the UI has exited
+    });
+    let piece = match result {
+        Ok(()) => ReplyPiece::Finished,
+        Err(error) => ReplyPiece::Failed(format!("{error:#}")),
+    };
+    let _ = events.send(Event::Reply { request_id, piece });
+}
+
+/// Removes and returns the complete UTF-8 text at the start of `pending`,
+/// leaving the first bytes of a character that is still being generated.
+#[cfg(any(llamacpp, test))]
+fn take_complete_utf8(pending: &mut Vec<u8>) -> String {
+    let complete = match std::str::from_utf8(pending) {
+        Ok(_) => pending.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(), // the rest may arrive with the next token
+        Err(_) => pending.len(), // invalid bytes: show them as replacement characters
+    };
+    let text = String::from_utf8_lossy(&pending[..complete]).into_owned();
+    pending.drain(..complete);
+    text
 }
 
 /// Formats the conversation in ChatML, Qwen's chat format, ending with an
@@ -417,6 +610,17 @@ mod tests {
         assert_eq!((limits.max_input_len, limits.max_seq_len), (14336, 16384));
         let limits = built.within_kv_cache(32768);
         assert_eq!((limits.max_input_len, limits.max_seq_len), (30720, 32768));
+    }
+
+    #[test]
+    fn characters_split_across_tokens_are_held_back_until_complete() {
+        let crab = "🦀".as_bytes();
+        let mut pending = b"hi ".to_vec();
+        pending.extend_from_slice(&crab[..2]);
+        assert_eq!(take_complete_utf8(&mut pending), "hi ");
+        pending.extend_from_slice(&crab[2..]);
+        assert_eq!(take_complete_utf8(&mut pending), "🦀");
+        assert!(pending.is_empty());
     }
 
     #[test]

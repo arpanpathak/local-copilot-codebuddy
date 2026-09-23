@@ -7,7 +7,7 @@ use std::fs;
 /// Memory left for the rest of the system once the model is loaded. The
 /// engine's file size, counted as its cost, over-covers the runtime's own
 /// buffers, so in practice the desktop keeps about 1.5 times this.
-const SYSTEM_HEADROOM: u64 = 1 << 30;
+pub const SYSTEM_HEADROOM: u64 = 1 << 30;
 
 /// The KV cache is stored in blocks of this many tokens.
 const TOKENS_PER_BLOCK: u64 = 64;

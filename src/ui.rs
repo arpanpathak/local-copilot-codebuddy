@@ -162,13 +162,13 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         Status::Finished(timing) => Span::styled(reply_speed(timing), MUTED),
         Status::Failed(error) => Span::styled(error.as_str(), ERROR_COLOR),
     };
-    // Badges: a solid green "NVIDIA" block, then "TensorRT-LLM" in green on dark.
+    // Badges: a solid green "NVIDIA" block, then the engine in green on dark.
     let nvidia_badge = Style::new().fg(BADGE_TEXT).bg(NVIDIA_GREEN).add_modifier(Modifier::BOLD);
-    let tensorrt_badge = Style::new().fg(NVIDIA_GREEN).bg(BADGE_TEXT).add_modifier(Modifier::BOLD);
+    let engine_badge = Style::new().fg(NVIDIA_GREEN).bg(BADGE_TEXT).add_modifier(Modifier::BOLD);
     let status = Line::from(vec![
         Span::styled(" ▲ NVIDIA ", nvidia_badge),
         Span::raw(" "),
-        Span::styled(" TensorRT-LLM ", tensorrt_badge),
+        Span::styled(format!(" {} ", app.model.engine_name()), engine_badge),
         Span::styled(format!(" {} ", app.model.name()), ACCENT),
         Span::styled(format!("ctx {}/{} · ", app.context_tokens, app.model.context_limit()), MUTED),
         progress,

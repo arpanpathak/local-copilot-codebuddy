@@ -8,10 +8,11 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Cli {
-    /// Hugging Face model directory (for the tokenizer).
-    /// Default: ~/models/trt/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4
+    /// The model: a Hugging Face model directory with a TensorRT-LLM engine
+    /// next to it, or a .gguf file (llama.cpp). Default: choose from the
+    /// models in ~/models.
     #[arg(env = "CODEBUDDY_MODEL")]
-    pub model_dir: Option<PathBuf>,
+    pub model: Option<PathBuf>,
 
     /// TensorRT engine directory. Default: `<MODEL_DIR>-engine`, where
     /// engine/build-engine.sh puts it.
@@ -52,17 +53,6 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// The model directory, falling back to the default location.
-    pub fn model_dir(&self) -> PathBuf {
-        match &self.model_dir {
-            Some(model_dir) => model_dir.clone(),
-            None => {
-                let home = std::env::var_os("HOME").unwrap_or_default();
-                PathBuf::from(home).join("models/trt/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4")
-            }
-        }
-    }
-
     /// The system prompt, with the rules file appended when there is one.
     pub fn system_prompt(&self) -> anyhow::Result<String> {
         let (path, required) = match &self.rules {

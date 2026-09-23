@@ -175,8 +175,43 @@ cargo install --path .
 local-copilot-codebuddy
 ```
 
+Started without a model argument, the app lists the models it finds in
+`~/models` and you pick one with the arrow keys:
+
+```
+Choose a model
+
+❯ Qwen2.5-Coder-7B-Instruct-GPTQ-Int4   TensorRT-LLM  5.6 GB
+  Qwen3.5-9B-UD-Q4_K_XL                 llama.cpp     6.0 GB
+
+↑↓ select · enter load · esc quit
+```
+
 Loading takes about 10 seconds. The model then uses about 4.5 GB for weights
 and runtime, plus up to 1.75 GB for the 32K-token KV cache.
+
+**4. Optional: GGUF models with llama.cpp** (once, about 20 minutes):
+
+```sh
+engine/install-llama.sh          # builds llama.cpp with CUDA for the Jetson
+cargo install --path .           # rebuild to include the llama.cpp engine
+```
+
+Then put any Qwen-family `.gguf` file in `~/models/gguf/` (a subfolder is fine)
+and it appears in the list. This runs models TensorRT-LLM 0.12 cannot, such as
+Qwen3.5-9B:
+
+```sh
+hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir ~/models/gguf/Qwen3.5-9B
+```
+
+| | Qwen2.5-Coder-7B (TensorRT-LLM) | Qwen3.5-9B (llama.cpp) |
+|---|---|---|
+| Speed on Orin NX | about 16 tok/s | about 11 tok/s |
+| Memory | about 6.2 GB at 32K context | about 6 to 7 GB at 32K context |
+| Follow-up answers | reuse the cache (first token 0.1 s) | reuse the cache when the model allows it |
+
+Without llama.cpp installed, the app builds as before with TensorRT-LLM only.
 
 The status bar shows how full the context is (`ctx 1393/30720`), the
 generation speed, and how long the model took to read the prompt before the
@@ -185,13 +220,14 @@ first token (`first token 0.5s`).
 ## Usage
 
 ```
-local-copilot-codebuddy [OPTIONS] [MODEL_DIR]
+local-copilot-codebuddy [OPTIONS] [MODEL]
 
-  [MODEL_DIR]                  Hugging Face model directory (tokenizer)
+  [MODEL]                      A Hugging Face model directory with a TensorRT-LLM
+                               engine next to it, or a .gguf file (llama.cpp)
                                [env: CODEBUDDY_MODEL]
-                               [default: ~/models/trt/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4]
-  -e, --engine <DIR>           Engine directory [env: CODEBUDDY_ENGINE]
-                               [default: <MODEL_DIR>-engine]
+                               [default: choose from the models in ~/models]
+  -e, --engine <DIR>           TensorRT-LLM engine directory [env: CODEBUDDY_ENGINE]
+                               [default: <MODEL>-engine]
   -s, --system <PROMPT>        System prompt [env: CODEBUDDY_SYSTEM]
   -r, --rules <FILE>           Your coding rules, added to every conversation
                                [env: CODEBUDDY_RULES]
@@ -242,8 +278,9 @@ engine/build-engine.sh Qwen/Qwen2.5-Coder-3B-Instruct-GPTQ-Int4
 local-copilot-codebuddy ~/models/trt/Qwen2.5-Coder-3B-Instruct-GPTQ-Int4
 ```
 
-The prompt format is ChatML (Qwen's). Other model families need their own chat
-format in `chat.rs` and their own conversion step in `engine/`.
+GGUF models from the Qwen family work on llama.cpp as they are (see Setup,
+step 4). The prompt format is ChatML (Qwen's); other model families need
+their own chat format in `chat.rs`.
 
 ## Performance per watt
 
@@ -282,6 +319,7 @@ cargo fmt
 
 ## Roadmap
 
+- [x] Pick the model and engine at startup (TensorRT-LLM or llama.cpp).
 - [ ] Other model families (Llama, Mistral, Phi, Gemma): read each model's own
       chat template and stop tokens, and a generic engine build script.
 
