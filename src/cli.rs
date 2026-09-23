@@ -1,0 +1,71 @@
+//! Command-line interface.
+
+use std::path::PathBuf;
+
+use clap::Parser;
+
+/// Terminal chat with an LLM running locally on TensorRT-LLM.
+#[derive(Debug, Parser)]
+#[command(version, about)]
+pub struct Cli {
+    /// Hugging Face model directory (for the tokenizer).
+    /// Default: ~/models/trt/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4
+    #[arg(env = "CODEBUDDY_MODEL")]
+    pub model_dir: Option<PathBuf>,
+
+    /// TensorRT engine directory. Default: `<MODEL_DIR>-engine`, where
+    /// engine/build-engine.sh puts it.
+    #[arg(short, long, env = "CODEBUDDY_ENGINE")]
+    pub engine: Option<PathBuf>,
+
+    /// System prompt that starts every conversation.
+    #[arg(
+        short,
+        long,
+        env = "CODEBUDDY_SYSTEM",
+        default_value = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant. \
+            Match the depth of your answer to the request: answer simple questions briefly, but when asked \
+            to explain or go into detail, write a long, thorough, well-structured answer with headings, \
+            examples and code, like a chapter of a good technical book."
+    )]
+    pub system: String,
+
+    /// Sampling temperature (0 = greedy). Default: the model's recommendation
+    /// from its generation_config.json (0.7 for Qwen2.5-Coder).
+    #[arg(short, long)]
+    pub temperature: Option<f32>,
+
+    /// Maximum number of tokens generated per reply.
+    #[arg(long, default_value_t = 8192)]
+    pub max_tokens: u32,
+
+    /// KV cache size in tokens: how much conversation fits in memory. Lowered
+    /// automatically when free memory is short, so the system never swaps.
+    #[arg(long, default_value_t = 32768)]
+    pub kv_cache_tokens: u32,
+}
+
+impl Cli {
+    /// The model directory, falling back to the default location.
+    pub fn model_dir(&self) -> PathBuf {
+        match &self.model_dir {
+            Some(model_dir) => model_dir.clone(),
+            None => {
+                let home = std::env::var_os("HOME").unwrap_or_default();
+                PathBuf::from(home).join("models/trt/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4")
+            }
+        }
+    }
+
+    /// The engine directory, falling back to `<model_dir>-engine`.
+    pub fn engine_dir(&self, model_dir: &std::path::Path) -> PathBuf {
+        match &self.engine {
+            Some(engine) => engine.clone(),
+            None => {
+                let mut engine_dir = model_dir.as_os_str().to_owned();
+                engine_dir.push("-engine");
+                PathBuf::from(engine_dir)
+            }
+        }
+    }
+}

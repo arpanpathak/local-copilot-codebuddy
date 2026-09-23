@@ -1,0 +1,31 @@
+[package]
+name = "local-copilot-codebuddy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Private, offline coding assistant for the terminal, running a TensorRT-LLM engine in-process on NVIDIA Jetson"
+repository = "https://github.com/arpanpathak/local-copilot-codebuddy"
+authors = ["Arpan Pathak <arpan.pathak47@gmail.com>"]
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["llm", "copilot", "jetson", "tensorrt", "coding-assistant"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive", "env"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[build-dependencies]
+cc = "1"
