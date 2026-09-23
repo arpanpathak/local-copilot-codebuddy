@@ -22,7 +22,7 @@ const LIST_MARKER_STYLE: Style = Style::new().fg(ACCENT);
 /// The copy button on a code block's header: dark text on the accent colour.
 const COPY_BUTTON_STYLE: Style = Style::new().fg(Color::Rgb(17, 17, 27)).bg(ACCENT).add_modifier(Modifier::BOLD);
 /// The label of the copy button on every code block.
-pub const COPY_BUTTON: &str = " ⧉ copy ";
+pub const COPY_BUTTON: &str = " copy ";
 
 const HORIZONTAL_RULE: &str = "────────────────────────────────────────";
 const CODE_GUTTER: &str = "▏ ";
@@ -364,7 +364,7 @@ mod tests {
         let source = "```rust\nfn main() {}\n\n```\n";
         let rendered = render(source, &Highlighter::new());
         let lines = rendered.lines;
-        assert_eq!(plain_text(&lines), ["▏ rust   ⧉ copy ", "▏ fn main() {}", "▏ "]);
+        assert_eq!(plain_text(&lines), ["▏ rust   copy ", "▏ fn main() {}", "▏ "]);
         assert_eq!(rendered.code_headers, [0]);
 
         let code_spans = &lines[1].spans[1..]; // skip the gutter
