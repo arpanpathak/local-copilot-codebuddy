@@ -33,23 +33,15 @@ Just a single native binary that loads a TensorRT-LLM engine straight onto the J
 
 ---
 
-```
- ❯ you
- Write a Rust function that checks if a string is a palindrome, ignoring case.
+<div align="center">
 
- ◆ assistant
- ▏ rust
- ▏ fn is_palindrome(s: &str) -> bool {
- ▏     let cleaned: String = s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
- ▏     cleaned.chars().eq(cleaned.chars().rev())
- ▏ }
-╭ message ─────────────────────────────────────────────────────────────────────╮
-│                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────╯
- ▲ NVIDIA  TensorRT-LLM  Qwen2.5-Coder-7B-Instruct-GPTQ-Int4 ctx 212/30720 · 51 tok · 14.5 tok/s
-```
+![local-copilot-codebuddy writing a generic tree in Rust, then copying the code with one click](docs/demo.gif)
 
-> That reply is real output from a Jetson Orin NX 16GB in MAXN_SUPER mode.
+*A real, unedited session on a Jetson Orin NX 16GB, in real time: asked for an idiomatic,
+zero-copy generic tree in Rust, it streams 933 tokens at about 16 tok/s, then the code is
+copied with one click.* [Full-quality video (MP4)](docs/demo.mp4)
+
+</div>
 
 ## Why
 
