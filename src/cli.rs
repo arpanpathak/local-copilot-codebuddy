@@ -30,6 +30,12 @@ pub struct Cli {
     )]
     pub system: String,
 
+    /// Your coding rules (a Markdown file), added to the system prompt of
+    /// every conversation so the model keeps following them.
+    /// Default: ~/.config/local-copilot-codebuddy/rules.md, if it exists.
+    #[arg(short, long, env = "CODEBUDDY_RULES")]
+    pub rules: Option<PathBuf>,
+
     /// Sampling temperature (0 = greedy). Default: the model's recommendation
     /// from its generation_config.json (0.7 for Qwen2.5-Coder).
     #[arg(short, long)]
@@ -55,6 +61,27 @@ impl Cli {
                 PathBuf::from(home).join("models/trt/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4")
             }
         }
+    }
+
+    /// The system prompt, with the rules file appended when there is one.
+    pub fn system_prompt(&self) -> anyhow::Result<String> {
+        let (path, required) = match &self.rules {
+            Some(path) => (path.clone(), true),
+            None => {
+                let home = std::env::var_os("HOME").unwrap_or_default();
+                (PathBuf::from(home).join(".config/local-copilot-codebuddy/rules.md"), false)
+            }
+        };
+        let rules = match std::fs::read_to_string(&path) {
+            Ok(rules) => rules,
+            Err(_) if !required => return Ok(self.system.clone()),
+            Err(error) => anyhow::bail!("cannot read the rules file {}: {error}", path.display()),
+        };
+        Ok(format!(
+            "{}\n\nThe user's coding rules. Follow them in every answer, for the whole conversation:\n\n{}",
+            self.system,
+            rules.trim()
+        ))
     }
 
     /// The engine directory, falling back to `<model_dir>-engine`.

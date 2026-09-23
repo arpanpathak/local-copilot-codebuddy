@@ -34,6 +34,7 @@ const MOUSE_CLICKS_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let system_prompt = cli.system_prompt()?;
     let model_dir = cli.model_dir();
     let engine_dir = cli.engine_dir(&model_dir);
     let settings =
@@ -44,7 +45,7 @@ fn main() -> Result<()> {
 
     let (event_sender, event_receiver) = mpsc::channel();
     event::spawn_terminal_reader(event_sender.clone());
-    let app = App::new(model, Highlighter::new(), Some(cli.system), event_sender);
+    let app = App::new(model, Highlighter::new(), Some(system_prompt), event_sender);
 
     // ratatui::run sets up the terminal and restores it afterwards, even on panic.
     ratatui::run(|terminal| {

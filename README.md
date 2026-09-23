@@ -193,6 +193,9 @@ local-copilot-codebuddy [OPTIONS] [MODEL_DIR]
   -e, --engine <DIR>           Engine directory [env: CODEBUDDY_ENGINE]
                                [default: <MODEL_DIR>-engine]
   -s, --system <PROMPT>        System prompt [env: CODEBUDDY_SYSTEM]
+  -r, --rules <FILE>           Your coding rules, added to every conversation
+                               [env: CODEBUDDY_RULES]
+                               [default: ~/.config/local-copilot-codebuddy/rules.md]
   -t, --temperature <T>        Sampling temperature, 0 = greedy
                                [default: the model's generation_config.json, 0.7 for Qwen]
       --max-tokens <N>         Maximum tokens per reply [default: 8192]
@@ -215,6 +218,20 @@ local-copilot-codebuddy [OPTIONS] [MODEL_DIR]
 
 The app listens for mouse clicks (for the copy buttons) and the wheel. To
 select any other text with the mouse, hold `Shift` while dragging.
+
+## Your coding rules
+
+Rules you give in the middle of a chat fade as the conversation grows. Put
+them in `~/.config/local-copilot-codebuddy/rules.md` instead, and they are added
+to the system prompt of every conversation:
+
+```md
+- Rust 2024 edition. No `unwrap()` outside tests; return `anyhow::Result`.
+- Prefer iterators over index loops, and borrow instead of cloning.
+- Doc comments on every public item. No emojis in code or comments.
+```
+
+Use `--rules <FILE>` for a per-project file, e.g. `--rules ./RULES.md`.
 
 ## Other models
 
