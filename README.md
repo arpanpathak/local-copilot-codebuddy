@@ -76,6 +76,7 @@ self-contained coding assistant:
 | 🎨 | **Markdown and syntax highlighting** | Headings, lists, quotes and tables render in the terminal. Code is highlighted with bat's grammar set, even while a code block is still streaming in. |
 | 📚 | **32K-token context** | Paste a 15K-token codebase in one go. It is answered correctly, and questions can refer back to its first line. |
 | 🚀 | **Fast follow-ups** | The KV cache of the conversation so far is reused, so a new turn only processes the new message. After that 15K-token paste, the next answer starts in 0.5 s instead of about 30 s. |
+| 📋 | **One-click copy** | Every code block has a `⧉ copy` button. Click it, or press `Ctrl+Y` for the latest block, and the code lands on your clipboard (over SSH too, via OSC 52). |
 | 🛑 | **Instant stop** | `Ctrl+C` or `Esc` cancels generation on the GPU itself and keeps the partial reply. |
 | 🪶 | **Idle means idle** | With no reply streaming, the process uses 0% CPU. |
 
@@ -214,10 +215,14 @@ local-copilot-codebuddy [OPTIONS] [MODEL_DIR]
 | `Ctrl+C` / `Esc`        | Stop generating (keeps the partial reply); when idle, `Ctrl+C` clears the input |
 | `↑` `↓` / `PgUp` `PgDn` | Scroll                                     |
 | `End`                   | Back to the bottom, follow new output      |
+| `Ctrl+Y`                | Copy the latest code block                 |
+| Click `⧉ copy`          | Copy that code block                       |
+| Mouse wheel             | Scroll                                     |
 | `Ctrl+L`                | New conversation                           |
 | `Ctrl+D`                | Quit                                       |
 
-Mouse capture is off, so your terminal's own selection works for copying code.
+The app listens for mouse clicks (for the copy buttons) and the wheel. To
+select any other text with the mouse, hold `Shift` while dragging.
 
 ## Other models
 
@@ -265,6 +270,11 @@ cargo test                   # markdown, prompt format, streaming decode, memory
 cargo clippy --all-targets
 cargo fmt
 ```
+
+## Roadmap
+
+- [ ] Other model families (Llama, Mistral, Phi, Gemma): read each model's own
+      chat template and stop tokens, and a generic engine build script.
 
 ## Contributing
 

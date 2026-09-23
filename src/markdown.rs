@@ -19,6 +19,10 @@ const MARGIN_STYLE: Style = Style::new().fg(MUTED);
 const INLINE_CODE_STYLE: Style = Style::new().fg(Color::Rgb(250, 179, 135));
 const LINK_STYLE: Style = Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED);
 const LIST_MARKER_STYLE: Style = Style::new().fg(ACCENT);
+/// The copy button on a code block's header: dark text on the accent colour.
+const COPY_BUTTON_STYLE: Style = Style::new().fg(Color::Rgb(17, 17, 27)).bg(ACCENT).add_modifier(Modifier::BOLD);
+/// The label of the copy button on every code block.
+pub const COPY_BUTTON: &str = " ⧉ copy ";
 
 const HORIZONTAL_RULE: &str = "────────────────────────────────────────";
 const CODE_GUTTER: &str = "▏ ";
@@ -26,14 +30,39 @@ const QUOTE_BAR: &str = "│ ";
 /// Source of indentation slices for list items (`"1. "` → 3 spaces).
 const SPACES: &str = "          ";
 
+const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TABLES).union(Options::ENABLE_TASKLISTS);
+
+/// Markdown rendered into terminal lines.
+pub struct Rendered<'a> {
+    pub lines: Vec<Line<'a>>,
+    /// The index in `lines` of each code block's header (the line with its
+    /// copy button), in the same order as [`code_blocks`] returns the code.
+    pub code_headers: Vec<usize>,
+}
+
 /// Renders `source` into lines that borrow from it.
-pub fn render<'a>(source: &'a str, highlighter: &Highlighter) -> Vec<Line<'a>> {
-    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+pub fn render<'a>(source: &'a str, highlighter: &Highlighter) -> Rendered<'a> {
     let mut renderer = MarkdownRenderer::new(highlighter);
-    for event in Parser::new_ext(source, options) {
+    for event in Parser::new_ext(source, OPTIONS) {
         renderer.handle_event(event);
     }
     renderer.finish()
+}
+
+/// The code of each code block in `source`, as it would be pasted.
+pub fn code_blocks(source: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<String> = None;
+    for event in Parser::new_ext(source, OPTIONS) {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => current = Some(String::new()),
+            Event::Text(text) if current.is_some() => current.as_mut().unwrap().push_str(&text),
+            Event::End(TagEnd::CodeBlock) => blocks.extend(current.take()),
+            _ => {}
+        }
+    }
+    blocks.extend(current); // a block still streaming in
+    blocks
 }
 
 /// Walks pulldown-cmark's event stream and builds lines.
@@ -41,6 +70,8 @@ struct MarkdownRenderer<'a, 'h> {
     highlighter: &'h Highlighter,
     /// Finished lines.
     lines: Vec<Line<'a>>,
+    /// Where each code block's header is in `lines`.
+    code_headers: Vec<usize>,
     /// The line being built.
     current_line: Vec<Span<'a>>,
     /// Nested inline styles (bold inside a link inside a heading…).
@@ -58,6 +89,7 @@ impl<'a, 'h> MarkdownRenderer<'a, 'h> {
         Self {
             highlighter,
             lines: Vec::new(),
+            code_headers: Vec::new(),
             current_line: Vec::new(),
             style_stack: Vec::new(),
             margins: Vec::new(),
@@ -67,12 +99,12 @@ impl<'a, 'h> MarkdownRenderer<'a, 'h> {
     }
 
     /// Returns the lines, without trailing blank ones.
-    fn finish(mut self) -> Vec<Line<'a>> {
+    fn finish(mut self) -> Rendered<'a> {
         self.end_line_if_not_empty();
         while self.lines.last().is_some_and(|line| line.spans.is_empty()) {
             self.lines.pop();
         }
-        self.lines
+        Rendered { lines: self.lines, code_headers: self.code_headers }
     }
 
     fn handle_event(&mut self, event: Event<'a>) {
@@ -169,7 +201,7 @@ impl<'a, 'h> MarkdownRenderer<'a, 'h> {
         }
     }
 
-    /// Opens a code block: a gutter on the left and a language label on top.
+    /// Opens a code block: a gutter on the left, and on top the language and a copy button.
     fn start_code_block(&mut self, kind: CodeBlockKind<'a>) {
         self.end_line_if_not_empty();
 
@@ -184,8 +216,11 @@ impl<'a, 'h> MarkdownRenderer<'a, 'h> {
         if !language.is_empty() {
             let label_style = MARGIN_STYLE.add_modifier(Modifier::ITALIC);
             self.add_span(Span::styled(language.to_owned(), label_style));
-            self.end_line();
+            self.add_span(Span::raw("  "));
         }
+        self.add_span(Span::styled(COPY_BUTTON, COPY_BUTTON_STYLE));
+        self.code_headers.push(self.lines.len());
+        self.end_line();
     }
 
     /// Starts a list item with its bullet or number, and indents what follows.
@@ -318,7 +353,7 @@ mod tests {
     #[test]
     fn renders_common_blocks() {
         let source = "# Title\n\nSome **bold** and `code`.\n\n- one\n- two\n\n1. first\n2. second\n\n> quoted\n";
-        let lines = render(source, &Highlighter::new());
+        let lines = render(source, &Highlighter::new()).lines;
         let expected =
             ["# Title", "", "Some bold and code.", "", "• one", "• two", "", "1. first", "2. second", "", "│ quoted"];
         assert_eq!(plain_text(&lines), expected);
@@ -327,8 +362,10 @@ mod tests {
     #[test]
     fn highlights_code_and_borrows_from_the_source() {
         let source = "```rust\nfn main() {}\n\n```\n";
-        let lines = render(source, &Highlighter::new());
-        assert_eq!(plain_text(&lines), ["▏ rust", "▏ fn main() {}", "▏ "]);
+        let rendered = render(source, &Highlighter::new());
+        let lines = rendered.lines;
+        assert_eq!(plain_text(&lines), ["▏ rust   ⧉ copy ", "▏ fn main() {}", "▏ "]);
+        assert_eq!(rendered.code_headers, [0]);
 
         let code_spans = &lines[1].spans[1..]; // skip the gutter
         assert!(code_spans.len() > 1, "expected several highlighted tokens");
@@ -337,8 +374,21 @@ mod tests {
     }
 
     #[test]
+    fn code_blocks_hold_the_code_without_markup() {
+        let source =
+            "Try:\n\n```rust\nfn main() {\n    run();\n}\n```\n\nthen\n\n```\nls -la\n```\n\n```sh\necho still stre";
+        let rendered = render(source, &Highlighter::new());
+        let blocks = code_blocks(source);
+        assert_eq!(blocks, ["fn main() {\n    run();\n}\n", "ls -la\n", "echo still stre"]);
+        assert_eq!(rendered.code_headers.len(), blocks.len());
+        for header in rendered.code_headers {
+            assert!(rendered.lines[header].to_string().contains(COPY_BUTTON));
+        }
+    }
+
+    #[test]
     fn unclosed_fence_mid_stream_still_renders() {
-        let lines = render("text\n\n```py\ndef f(", &Highlighter::new());
+        let lines = render("text\n\n```py\ndef f(", &Highlighter::new()).lines;
         assert_eq!(plain_text(&lines).last().map(String::as_str), Some("▏ def f("));
     }
 }

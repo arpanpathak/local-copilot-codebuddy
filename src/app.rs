@@ -6,12 +6,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 
 use crate::chat::{ChatModel, Message, ReplyStream, Role};
+use crate::clipboard::Clipboard;
 use crate::event::{Event, ReplyPiece};
 use crate::highlight::Highlighter;
-use crate::ui;
+use crate::{markdown, ui};
+
+/// Rows one turn of the mouse wheel scrolls.
+const WHEEL_ROWS: u16 = 3;
 
 /// What the assistant is doing right now; shown in the status bar.
 pub enum Status {
@@ -88,6 +95,11 @@ pub struct App {
     pub page_height: u16,
     /// Tokens the conversation takes up so far, out of `model.context_limit()`.
     pub context_tokens: usize,
+    /// Where the transcript was drawn; updated by the UI every frame.
+    pub transcript_area: Rect,
+    /// A short message for the status bar (e.g. "copied"), until the next key.
+    pub notice: Option<String>,
+    clipboard: Clipboard,
     events: Sender<Event>,
     should_quit: bool,
 }
@@ -115,6 +127,9 @@ impl App {
             max_scroll: 0,
             page_height: 0,
             context_tokens: 0,
+            transcript_area: Rect::default(),
+            notice: None,
+            clipboard: Clipboard::new(),
             events,
             should_quit: false,
         }
@@ -153,18 +168,21 @@ impl App {
         match event {
             Event::Terminal(TerminalEvent::Key(key)) if key.kind == KeyEventKind::Press => self.handle_key(key),
             Event::Terminal(TerminalEvent::Paste(text)) => self.input.push_str(&text),
+            Event::Terminal(TerminalEvent::Mouse(mouse)) => self.handle_mouse(mouse),
             Event::Terminal(_) => {} // resizes just need the redraw that follows
             Event::Reply { request_id, piece } => self.handle_reply(request_id, piece),
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        self.notice = None;
         let page = self.page_height.saturating_sub(2).max(1);
 
         match (key.code, key.modifiers) {
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.should_quit = true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.interrupt(),
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => self.new_conversation(),
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => self.copy_latest_code_block(),
             (KeyCode::Char('j'), KeyModifiers::CONTROL) => self.input.push('\n'),
             (KeyCode::Enter, KeyModifiers::ALT | KeyModifiers::SHIFT) => self.input.push('\n'),
             (KeyCode::Enter, _) => self.send_message(),
@@ -180,6 +198,39 @@ impl App {
             (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT) => self.input.push(character),
             _ => {}
         }
+    }
+
+    /// Clicking a code block's copy button copies its code; the wheel scrolls.
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(code) = ui::code_block_at(self, Position::new(mouse.column, mouse.row)) {
+                    self.copy(&code);
+                }
+            }
+            MouseEventKind::ScrollUp => self.scroll_up(WHEEL_ROWS),
+            MouseEventKind::ScrollDown => self.scroll_down(WHEEL_ROWS),
+            _ => {}
+        }
+    }
+
+    /// Ctrl+Y: copies the last code block of the conversation.
+    fn copy_latest_code_block(&mut self) {
+        let latest = self.messages.iter().rev().find_map(|message| match message.role {
+            Role::Assistant => markdown::code_blocks(&message.content).pop(),
+            _ => None,
+        });
+        match latest {
+            Some(code) => self.copy(&code),
+            None => self.notice = Some("no code to copy yet".to_owned()),
+        }
+    }
+
+    fn copy(&mut self, code: &str) {
+        self.notice = Some(match self.clipboard.copy(code) {
+            Ok(()) => format!("✓ copied {} lines", code.lines().count()),
+            Err(error) => format!("cannot copy: {error}"),
+        });
     }
 
     /// Sends the input box as a user message and starts streaming the reply.

@@ -18,7 +18,7 @@ const ERROR_COLOR: Color = Color::Rgb(243, 139, 168);
 
 /// The input box grows with its text up to this many lines.
 const MAX_INPUT_LINES: u16 = 8;
-const KEY_HINTS: &str = "enter send · alt+enter newline · ^c stop · ^l clear · ^d quit ";
+const KEY_HINTS: &str = "enter send · alt+enter newline · ^y copy code · ^c stop · ^l clear · ^d quit ";
 
 /// NVIDIA's brand green, used for the badges in the status bar.
 const NVIDIA_GREEN: Color = Color::Rgb(118, 185, 0);
@@ -49,24 +49,60 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let lines = transcript_lines(&app.messages, &app.highlighter);
+    let (lines, _) = transcript_lines(&app.messages, &app.highlighter);
     let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
 
     let total_rows = transcript.line_count(area.width) as u16;
     app.max_scroll = total_rows.saturating_sub(area.height);
     app.page_height = area.height;
+    app.transcript_area = area;
 
     frame.render_widget(transcript.scroll((app.scroll_offset(), 0)), area);
 }
 
-/// Turns the conversation into styled lines. The lines borrow the message
-/// text; nothing is copied.
-fn transcript_lines<'a>(messages: &'a [Message], highlighter: &Highlighter) -> Vec<Line<'a>> {
+/// A code block's copy button in the transcript.
+struct CopyButton {
+    /// The transcript line the button is on.
+    line: usize,
+    /// The message the code block belongs to.
+    message: usize,
+    /// Which code block of that message it is.
+    block: usize,
+}
+
+/// The code of the block whose copy button is at `position` on screen, if any.
+pub fn code_block_at(app: &App, position: Position) -> Option<String> {
+    let area = app.transcript_area;
+    if !area.contains(position) {
+        return None;
+    }
+    let (lines, buttons) = transcript_lines(&app.messages, &app.highlighter);
+
+    // Find the transcript line on the clicked row, allowing for wrapped lines.
+    let clicked_row = usize::from(app.scroll_offset() + position.y - area.y);
+    let mut row = 0;
+    let mut clicked_line = None;
+    for (index, line) in lines.into_iter().enumerate() {
+        row += Paragraph::new(line).wrap(Wrap { trim: false }).line_count(area.width);
+        if row > clicked_row {
+            clicked_line = Some(index);
+            break;
+        }
+    }
+
+    let button = buttons.iter().find(|button| Some(button.line) == clicked_line)?;
+    markdown::code_blocks(&app.messages[button.message].content).into_iter().nth(button.block)
+}
+
+/// Turns the conversation into styled lines, and notes where the copy buttons
+/// are. The lines borrow the message text; nothing is copied.
+fn transcript_lines<'a>(messages: &'a [Message], highlighter: &Highlighter) -> (Vec<Line<'a>>, Vec<CopyButton>) {
     let user_header = Style::new().fg(USER_COLOR).add_modifier(Modifier::BOLD);
     let assistant_header = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 
     let mut lines = Vec::new();
-    for message in messages {
+    let mut buttons = Vec::new();
+    for (message_index, message) in messages.iter().enumerate() {
         match message.role {
             Role::System => continue, // the system prompt is not shown
             Role::User => {
@@ -77,12 +113,16 @@ fn transcript_lines<'a>(messages: &'a [Message], highlighter: &Highlighter) -> V
             }
             Role::Assistant => {
                 lines.push(Line::styled("◆ assistant", assistant_header));
-                lines.extend(markdown::render(&message.content, highlighter));
+                let rendered = markdown::render(&message.content, highlighter);
+                for (block, header) in rendered.code_headers.into_iter().enumerate() {
+                    buttons.push(CopyButton { line: lines.len() + header, message: message_index, block });
+                }
+                lines.extend(rendered.lines);
             }
         }
         lines.push(Line::default()); // blank line between messages
     }
-    lines
+    (lines, buttons)
 }
 
 /// Draws the input box and places the cursor at the end of the text.
@@ -134,12 +174,21 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         progress,
     ]);
 
-    // The status keeps its full width; the key hints give way on narrow terminals.
+    // The status keeps its full width and the key hints give way on narrow
+    // terminals, but a notice ("copied") always shows in full.
     let status_width = status.width() as u16;
-    let [status_area, hints_area] =
-        Layout::horizontal([Constraint::Length(status_width), Constraint::Fill(1)]).areas(area);
+    let (right, right_constraint) = match &app.notice {
+        Some(notice) => {
+            let notice = Line::styled(format!(" {notice} "), USER_COLOR);
+            let width = notice.width() as u16;
+            (notice, Constraint::Length(width))
+        }
+        None => (Line::styled(KEY_HINTS, MUTED), Constraint::Fill(1)),
+    };
+    let [status_area, right_area] =
+        Layout::horizontal([Constraint::Max(status_width), right_constraint]).flex(Flex::SpaceBetween).areas(area);
     frame.render_widget(status, status_area);
-    frame.render_widget(Line::styled(KEY_HINTS, MUTED).right_aligned(), hints_area);
+    frame.render_widget(right.right_aligned(), right_area);
 }
 
 /// Formats a reply's speed, e.g. `212 tok · 16.3 tok/s · first token 0.4s`.
