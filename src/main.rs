@@ -81,7 +81,7 @@ fn main() -> Result<()> {
 
     let (event_sender, event_receiver) = mpsc::channel();
     event::spawn_terminal_reader(event_sender.clone());
-    let app = App::new(model, Highlighter::new(), Some(system_prompt), event_sender);
+    let app = App::new(model, Highlighter::new(), system_prompt, event_sender);
 
     // ratatui::run sets up the terminal and restores it afterwards, even on panic.
     ratatui::run(|terminal| {

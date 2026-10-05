@@ -19,17 +19,10 @@ pub struct Cli {
     #[arg(short, long, env = "CODEBUDDY_ENGINE")]
     pub engine: Option<PathBuf>,
 
-    /// System prompt that starts every conversation.
-    #[arg(
-        short,
-        long,
-        env = "CODEBUDDY_SYSTEM",
-        default_value = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant. \
-            Match the depth of your answer to the request: answer simple questions briefly, but when asked \
-            to explain or go into detail, write a long, thorough, well-structured answer with headings, \
-            examples and code, like a chapter of a good technical book."
-    )]
-    pub system: String,
+    /// System prompt that starts every conversation. None by default: the
+    /// model gets only what you give here and in the rules file.
+    #[arg(short, long, env = "CODEBUDDY_SYSTEM")]
+    pub system: Option<String>,
 
     /// Your coding rules (a Markdown file), added to the system prompt of
     /// every conversation so the model keeps following them.
@@ -46,15 +39,18 @@ pub struct Cli {
     #[arg(long, default_value_t = 8192)]
     pub max_tokens: u32,
 
-    /// KV cache size in tokens: how much conversation fits in memory. Lowered
-    /// automatically when free memory is short, so the system never swaps.
-    #[arg(long, default_value_t = 32768)]
-    pub kv_cache_tokens: u32,
+    /// KV cache size in tokens: how much conversation fits in memory.
+    /// Default: a GGUF model's full trained context, and 32768 for a
+    /// TensorRT-LLM engine. Lowered automatically when free memory is short,
+    /// so the system never swaps.
+    #[arg(long)]
+    pub kv_cache_tokens: Option<u32>,
 }
 
 impl Cli {
-    /// The system prompt, with the rules file appended when there is one.
-    pub fn system_prompt(&self) -> anyhow::Result<String> {
+    /// The system prompt: `--system` and the rules file, each used exactly as
+    /// written, or `None` when there is neither.
+    pub fn system_prompt(&self) -> anyhow::Result<Option<String>> {
         let (path, required) = match &self.rules {
             Some(path) => (path.clone(), true),
             None => {
@@ -63,15 +59,13 @@ impl Cli {
             }
         };
         let rules = match std::fs::read_to_string(&path) {
-            Ok(rules) => rules,
-            Err(_) if !required => return Ok(self.system.clone()),
+            Ok(rules) => Some(rules.trim().to_string()),
+            Err(_) if !required => None,
             Err(error) => anyhow::bail!("cannot read the rules file {}: {error}", path.display()),
         };
-        Ok(format!(
-            "{}\n\nThe user's coding rules. Follow them in every answer, for the whole conversation:\n\n{}",
-            self.system,
-            rules.trim()
-        ))
+        let parts: Vec<String> =
+            [self.system.clone(), rules].into_iter().flatten().filter(|part| !part.trim().is_empty()).collect();
+        Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
     }
 
     /// The engine directory, falling back to `<model_dir>-engine`.

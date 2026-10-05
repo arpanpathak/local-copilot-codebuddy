@@ -56,8 +56,12 @@ pub struct Settings {
     /// Overrides the model's recommended temperature when set.
     pub temperature: Option<f32>,
     pub max_tokens: u32,
-    pub kv_cache_tokens: u32,
+    /// Upper limit on the KV cache in tokens; `None` uses the model's default.
+    pub kv_cache_tokens: Option<u32>,
 }
+
+/// KV cache for a TensorRT-LLM engine when none is asked for.
+const DEFAULT_TRT_KV_CACHE_TOKENS: u32 = 32768;
 
 /// The model's recommended sampling settings, from its `generation_config.json`.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -189,7 +193,11 @@ impl ChatModel {
 
         let build = engine_config.build_config;
         let kv_cache_tokens =
-            kv_cache_tokens_that_fit(settings.kv_cache_tokens, engine_dir, &engine_config.pretrained_config)?;
+            kv_cache_tokens_that_fit(
+                settings.kv_cache_tokens.unwrap_or(DEFAULT_TRT_KV_CACHE_TOKENS),
+                engine_dir,
+                &engine_config.pretrained_config,
+            )?;
         let engine = Engine::load(engine_dir, kv_cache_tokens, build.plugin_config.use_paged_context_fmha)?;
         let name = match model_dir.file_name() {
             Some(name) => name.to_string_lossy().into_owned(),
@@ -226,7 +234,8 @@ impl ChatModel {
         }
         let skip_thinking = template.contains("<think>");
 
-        let requested = settings.kv_cache_tokens.min(engine.trained_context().max(memory::MIN_KV_CACHE_TOKENS));
+        let trained = engine.trained_context().max(memory::MIN_KV_CACHE_TOKENS);
+        let requested = settings.kv_cache_tokens.map_or(trained, |cap| cap.min(trained));
         let tokens = context_that_fits(&engine, requested)?;
         let room_for_reply = (tokens / 4).min(2048) as usize;
         let limits = EngineLimits { max_input_len: tokens as usize - room_for_reply, max_seq_len: tokens as usize };

@@ -1,5 +1,6 @@
 //! Compiles the C++ shims over the inference engines and links them:
-//! TensorRT-LLM (required) and llama.cpp (optional, for GGUF models).
+//! TensorRT-LLM and llama.cpp (for GGUF models). Either may be missing; without
+//! TensorRT-LLM a stub takes its place and only GGUF models run.
 //!
 //! Expects the runtime installed by `engine/install-runtime.sh`, in
 //! `$TRTLLM_ROOT` (default `~/.local/lib/local-copilot-codebuddy-trtllm`).
@@ -15,11 +16,17 @@ fn main() {
     };
     let include_dir = trtllm_root.join("include");
     let lib_dir = trtllm_root.join("lib");
-    assert!(
-        lib_dir.join("libtensorrt_llm.so").exists(),
-        "TensorRT-LLM runtime not found in {}; run engine/install-runtime.sh first",
-        trtllm_root.display()
-    );
+    println!("cargo:rerun-if-changed={}", lib_dir.join("libtensorrt_llm.so").display());
+    if !lib_dir.join("libtensorrt_llm.so").exists() {
+        println!(
+            "cargo:warning=TensorRT-LLM runtime not found in {}: building for GGUF models (llama.cpp) only",
+            trtllm_root.display()
+        );
+        cc::Build::new().cpp(true).std("c++17").file("cpp/trtllm_stub.cpp").compile("trtllm_shim");
+        println!("cargo:rerun-if-changed=cpp/trtllm_stub.cpp");
+        link_llama_cpp();
+        return;
+    }
 
     cc::Build::new()
         .cpp(true)
